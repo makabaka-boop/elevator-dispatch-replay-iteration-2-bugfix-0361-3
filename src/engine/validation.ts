@@ -5,6 +5,7 @@ import {
   MAX_REQUESTS,
   MIN_CARS,
   MIN_FLOORS,
+  type DestinationChange,
   type Scenario,
   type ScenarioOutageEvent,
   type ValidatedRequest,
@@ -177,14 +178,48 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
     });
   }
 
-  const destinationChanges = input?.destinationChanges ?? [];
-  if (!Array.isArray(destinationChanges)) errors.push('destinationChanges 必须是数组。');
-  else for (const change of destinationChanges) {
-    const request = validRequests.find(r => r.id === change.requestId);
-    if (!request || !isFiniteInteger(change.tick) || change.tick < request.arrivalTick ||
-        !isFiniteInteger(change.destination) || change.destination < 1 ||
-        change.destination > floorCount || change.destination === request.origin) {
-      errors.push('目的地更正事件无效。');
+  const rawDestinationChanges = input?.destinationChanges ?? [];
+  const destinationChanges: DestinationChange[] = [];
+  if (!Array.isArray(rawDestinationChanges)) {
+    errors.push('destinationChanges 必须是数组。');
+  } else {
+    rawDestinationChanges.forEach((change, index) => {
+      const prefix = `目的地更正 ${index + 1}`;
+      if (!change || typeof change !== 'object') {
+        errors.push(`${prefix}: 必须是包含 tick、requestId、destination 的对象。`);
+        return;
+      }
+      const request = validRequests.find((item) => item.id === change.requestId);
+      const destinationValid =
+        isFiniteInteger(change.destination) &&
+        change.destination >= 1 &&
+        change.destination <= floorCount &&
+        (!request || change.destination !== request.origin);
+      if (
+        !request ||
+        !isFiniteInteger(change.tick) ||
+        change.tick < request.arrivalTick ||
+        !destinationValid
+      ) {
+        errors.push(`${prefix}: 更正事件无效（请求需存在，tick 不早于到达，目的层合法且不同于出发层）。`);
+        return;
+      }
+      destinationChanges.push({
+        tick: change.tick,
+        requestId: change.requestId,
+        destination: change.destination
+      });
+    });
+
+    // Multiple corrections for one request at one tick have no defined "which agreement wins"
+    // order, so the scenario must disambiguate them across ticks.
+    const changeKeys = new Set<string>();
+    for (const change of destinationChanges) {
+      const key = `${change.requestId}@${change.tick}`;
+      if (changeKeys.has(key)) {
+        errors.push(`请求 ${change.requestId} 在 tick ${change.tick} 存在多个目的地更正；同一 tick 只能有一个。`);
+      }
+      changeKeys.add(key);
     }
   }
   if (errors.length > 0) {
@@ -192,7 +227,12 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
   }
 
   const scenario: ValidatedScenario = {
-    destinationChanges: destinationChanges.slice().sort((a,b) => a.tick-b.tick),
+    // Stable sort preserves input order for same-tick (cross-request) corrections; processTick
+    // applies them after cancellations and before outage/dispatch processing.
+    destinationChanges: destinationChanges
+      .map((change, index) => ({ change, index }))
+      .sort((a, b) => a.change.tick - b.change.tick || a.index - b.index)
+      .map(({ change }) => change),
     floors: floors as number,
     elevators: elevators as number,
     travelTicks: travelTicks as number,

@@ -102,7 +102,9 @@ function alightingAtFloor(
 ) {
   return car.onboard
     .map((entry) => ({ entry, request: requestMap.get(entry.requestId)! }))
-    .filter(({ request }) => request.destination === floor)
+    // Drop floor is read from the onboard batch (captured at boarding), never from the live
+    // request destination — a later correction must not retarget people already in the car.
+    .filter(({ entry, request }) => request && entry.destination === floor)
     .sort((a, b) => a.request.id.localeCompare(b.request.id, 'zh-CN'));
 }
 
@@ -117,9 +119,8 @@ function pickupFloors(car: ElevatorRuntime, requestMap: Map<string, RequestRunti
 }
 
 function dropFloors(car: ElevatorRuntime, requestMap: Map<string, RequestRuntime>): number[] {
-  return uniqueFloors(
-    car.onboard.map((entry) => requestMap.get(entry.requestId)!.destination)
-  );
+  void requestMap;
+  return uniqueFloors(car.onboard.map((entry) => entry.destination));
 }
 
 function emit(events: SimEvent[], event: SimEvent): void {
@@ -148,7 +149,7 @@ function doorReason(
     reason: `${parts.join('；') || '已承诺停靠'}，载重 ${carLoad(car)}/${CAR_CAPACITY}`,
     dropIds,
     pickupIds,
-    dropFloors: uniqueFloors(drops.map(({ request }) => request.destination)),
+    dropFloors: uniqueFloors(drops.map(({ entry }) => entry.destination)),
     pickupFloors: uniqueFloors(pickups.map(({ request }) => request.origin))
   };
 }
@@ -225,7 +226,13 @@ function transferPassengers(
       request.remaining -= boarding;
       request.boarded += boarding;
       request.status = 'riding';
-      car.onboard.push({ requestId: request.id, remaining: boarding });
+      car.onboard.push({
+        requestId: request.id,
+        remaining: boarding,
+        // Freeze the agreed destination for this batch at boarding time. A later
+        // destinationChange affects only passengers still waiting.
+        destination: request.destination
+      });
       if (!request.onboardCarIds.includes(car.id)) request.onboardCarIds.push(car.id);
       if (entry.remaining === 0) {
         car.waiting = car.waiting.filter((waiting) => waiting.requestId !== request.id);
@@ -274,7 +281,7 @@ function chooseTargetFloor(car: ElevatorRuntime, requestMap: Map<string, Request
   // the car is empty; otherwise a full car returning for a residual pickup could fight against
   // onboard destination direction.
   const onboardDestinations = uniqueFloors(
-    car.onboard.map((entry) => requestMap.get(entry.requestId)!.destination)
+    car.onboard.map((entry) => entry.destination)
   ).filter((floor) => floor !== car.floor);
   const targetFloors = onboardDestinations.length > 0
     ? onboardDestinations
@@ -739,6 +746,64 @@ function applyOutageEvents(
   }
 }
 
+function applyDestinationChanges(
+  state: RuntimeState,
+  scenario: ValidatedScenario,
+  tick: number
+): void {
+  const changes = scenario.destinationChanges.filter((event) => event.tick === tick);
+
+  for (const change of changes) {
+    const request = state.requests.find((item) => item.id === change.requestId);
+    if (!request) continue;
+
+    const fromFloor = request.destination;
+    const toFloor = change.destination;
+    // The correction binds only passengers who have not boarded at the instant it takes effect.
+    // Boarded batches keep the destination captured when they boarded (including batches frozen
+    // inside an out-of-service car), and a request already in a terminal state is never reopened.
+    const live = request.status === 'pending' || request.status === 'waiting' || request.status === 'riding';
+    const affectedPeople = live ? request.remaining : 0;
+
+    if (live && affectedPeople > 0) {
+      request.destination = toFloor;
+    }
+
+    let reason: string;
+    if (!live) {
+      reason =
+        `请求已处于终态（${request.status}），目的地约定不再重新开放；` +
+        `已送达批次保留其上车时目的地，本次更正影响 0 人。`;
+    } else if (affectedPeople === 0) {
+      reason =
+        `生效时不存在尚未上车的人：已上车批次保留各自上车时目的地，本次更正影响 0 人。`;
+    } else if (fromFloor === toFloor) {
+      reason = `新目的层与未上车乘客当前约定相同，${affectedPeople} 名未上车乘客目的地不变。`;
+    } else {
+      reason =
+        `更正只约束生效时尚未上车的 ${affectedPeople} 人；已上车批次（含停运冻结车内批次）` +
+        `保留上车时目的地，同一请求的不同批次可在不同楼层下车。`;
+    }
+
+    emit(state.events, {
+      tick,
+      requestId: request.id,
+      type: 'destination_change',
+      fromFloor,
+      toFloor,
+      people: affectedPeople,
+      remaining: request.remaining,
+      reason,
+      message:
+        affectedPeople > 0
+          ? `请求 ${request.id} 目的地约定由 ${fromFloor} 层更正为 ${toFloor} 层：` +
+            `${affectedPeople} 名未上车乘客改往 ${toFloor} 层；已上车乘客保留原目的层。`
+          : `请求 ${request.id} 记录一次目的地更正（${fromFloor} → ${toFloor} 层），` +
+            `但生效时没有未上车乘客，任何人的目的层都不改变。`
+    });
+  }
+}
+
 function uncommittedRequests(state: RuntimeState): RequestRuntime[] {
   const committedIds = new Set(state.cars.flatMap((car) => car.waiting.map((entry) => entry.requestId)));
   return state.requests.filter(
@@ -791,7 +856,17 @@ function makeSnapshot(
       cancelTick: request.cancelTick,
       status: request.status,
       carId: request.carId,
-      onboardCarIds: [...request.onboardCarIds]
+      onboardCarIds: [...request.onboardCarIds],
+      // Per-batch view: a request split across cars may show several distinct drop floors.
+      onboardBatches: state.cars.flatMap((car) =>
+        car.onboard
+          .filter((entry) => entry.requestId === request.id)
+          .map((entry) => ({
+            carId: car.id,
+            people: entry.remaining,
+            destination: entry.destination
+          }))
+      )
     })),
     events: structuredClone(state.events),
     totalWaiting: state.requests
@@ -854,10 +929,10 @@ function processTick(
     }
   }
 
-  for (const change of scenario.destinationChanges.filter(e => e.tick === tick)) {
-    const request = state.requests.find(r => r.id === change.requestId)!;
-    request.destination = change.destination;
-  }
+  // Destination corrections take effect after cancellations but before this tick's outages and
+  // car transitions, so a transfer on the same tick honours the new agreement while a cancel on
+  // the same tick removes people before they can be retargeted.
+  applyDestinationChanges(state, scenario, tick);
 
   // Scheduled outages take effect after arrivals/cancellations but before this tick's dispatch
   // and car transitions. At one tick, all outages precede recoveries; cars are then ordered by ID.

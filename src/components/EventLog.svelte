@@ -20,6 +20,7 @@
     outage: 'outage',
     recovery: 'outage',
     commitment_withdrawn: 'outage',
+    destination_change: 'change',
     idle: 'idle'
   };
 
@@ -40,6 +41,7 @@
     outage: '停运',
     recovery: '恢复',
     commitment_withdrawn: '撤回承诺',
+    destination_change: '目的地更正',
     idle: '待机'
   };
 </script>
@@ -147,6 +149,7 @@
   .alight { border-color: #4ade80; }
   .cancel { border-color: #fb7185; }
   .outage { border-color: #f97316; }
+  .change { border-color: #22d3ee; }
   .arrival { border-color: #94a3b8; }
   .idle { border-color: #475569; }
 

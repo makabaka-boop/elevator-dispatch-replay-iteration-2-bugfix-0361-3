@@ -26,7 +26,8 @@
         <tr>
           <th>ID</th>
           <th>到达</th>
-          <th>请求</th>
+          <th>出发</th>
+          <th>未上车目的</th>
           <th>总数</th>
           <th>剩余</th>
           <th>车内</th>
@@ -34,6 +35,7 @@
           <th>取消</th>
           <th>余客派车</th>
           <th>车内电梯</th>
+          <th>车内批次下客</th>
           <th>状态</th>
         </tr>
       </thead>
@@ -42,7 +44,8 @@
           <tr class={request.status}>
             <td class="mono">{request.id}</td>
             <td class="mono">{request.arrivalTick}</td>
-            <td class="mono">{request.origin}→{request.destination}</td>
+            <td class="mono">{request.origin}F</td>
+            <td class="mono">{request.remaining > 0 ? `${request.destination}F` : '—'}</td>
             <td>{request.people}</td>
             <td>{request.remaining}</td>
             <td>{Math.max(0, request.boarded - request.completed)}</td>
@@ -50,6 +53,13 @@
             <td>{request.cancelled}</td>
             <td>{request.carId === null ? '—' : `#${request.carId}`}</td>
             <td>{request.onboardCarIds.length ? request.onboardCarIds.map((id) => `#${id}`).join(',') : '—'}</td>
+            <td class="mono">
+              {request.onboardBatches.length
+                ? request.onboardBatches
+                    .map((batch) => `#${batch.carId}:${batch.people}人→${batch.destination}F`)
+                    .join('，')
+                : '—'}
+            </td>
             <td><span class="status">{statusLabel[request.status]}</span></td>
           </tr>
         {/each}

@@ -60,9 +60,20 @@ export interface ValidatedScenario {
   destinationChanges: DestinationChange[];
 }
 
-export interface CarRequest {
+export interface WaitingRequest {
   requestId: string;
   remaining: number;
+}
+
+export interface OnboardRequest {
+  requestId: string;
+  remaining: number;
+  /**
+   * Destination agreed at the moment this batch boarded. It is frozen: a later
+   * destinationChange only retargets passengers who have not yet boarded, so
+   * split batches of one request may ride to different floors.
+   */
+  destination: number;
 }
 
 export interface ElevatorRuntime {
@@ -72,8 +83,8 @@ export interface ElevatorRuntime {
   direction: Direction;
   phase: DoorPhase;
   phaseElapsed: number;
-  onboard: CarRequest[];
-  waiting: CarRequest[];
+  onboard: OnboardRequest[];
+  waiting: WaitingRequest[];
   attempted: string[];
   /** request IDs selected but not yet serviced at their origin. */
   committedPickups: string[];
@@ -117,6 +128,7 @@ export type SimEventType =
   | 'outage'
   | 'recovery'
   | 'commitment_withdrawn'
+  | 'destination_change'
   | 'idle';
 
 export interface SimEvent {
@@ -146,10 +158,18 @@ export interface SimEvent {
   peopleOnboard?: number;
 }
 
+export interface RequestBatchView {
+  carId: number;
+  people: number;
+  /** Destination this boarded batch is actually bound for (captured at boarding). */
+  destination: number;
+}
+
 export interface TickRequestView {
   id: string;
   arrivalTick: number;
   origin: number;
+  /** Destination currently agreed for everyone in this request who has not boarded yet. */
   destination: number;
   people: number;
   remaining: number;
@@ -160,6 +180,8 @@ export interface TickRequestView {
   status: RequestStatus;
   carId: number | null;
   onboardCarIds: number[];
+  /** One entry per car currently carrying a batch of this request, with its own drop floor. */
+  onboardBatches: RequestBatchView[];
 }
 
 export interface TickCarView {
@@ -174,7 +196,7 @@ export interface TickCarView {
   outOfService: boolean;
   outageStartedTick: number | null;
   waiting: Array<{ requestId: string; remaining: number }>;
-  onboard: Array<{ requestId: string; remaining: number }>;
+  onboard: Array<{ requestId: string; remaining: number; destination: number }>;
   attempted: string[];
   committedPickupFloors: number[];
   committedDropFloors: number[];
