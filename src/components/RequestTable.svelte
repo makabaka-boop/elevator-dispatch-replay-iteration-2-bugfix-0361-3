@@ -10,6 +10,17 @@
     completed: '完成',
     cancelled: '已取消'
   };
+
+  // Each onboard batch keeps the destination locked in at boarding time; one request
+  // can therefore list several cars with different floors.
+  function onboardBatches(requestId: string): string {
+    const batches = snapshot.cars.flatMap((car) =>
+      car.onboard
+        .filter((entry) => entry.requestId === requestId)
+        .map((entry) => `#${car.id}→${entry.destination}层(${entry.remaining}人)`)
+    );
+    return batches.length ? batches.join('，') : '—';
+  }
 </script>
 
 <div class="request-panel">
@@ -33,7 +44,7 @@
           <th>完成</th>
           <th>取消</th>
           <th>余客派车</th>
-          <th>车内电梯</th>
+          <th>车内批次（锁定目的层）</th>
           <th>状态</th>
         </tr>
       </thead>
@@ -49,7 +60,7 @@
             <td>{request.completed}</td>
             <td>{request.cancelled}</td>
             <td>{request.carId === null ? '—' : `#${request.carId}`}</td>
-            <td>{request.onboardCarIds.length ? request.onboardCarIds.map((id) => `#${id}`).join(',') : '—'}</td>
+            <td class="mono">{onboardBatches(request.id)}</td>
             <td><span class="status">{statusLabel[request.status]}</span></td>
           </tr>
         {/each}

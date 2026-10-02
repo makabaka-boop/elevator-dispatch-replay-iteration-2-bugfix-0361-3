@@ -100,9 +100,11 @@ function alightingAtFloor(
   requestMap: Map<string, RequestRuntime>,
   floor: number
 ) {
+  // Each onboard batch alights at the destination locked in when it boarded; a later
+  // destination change on the request never re-routes people already inside a car.
   return car.onboard
     .map((entry) => ({ entry, request: requestMap.get(entry.requestId)! }))
-    .filter(({ request }) => request.destination === floor)
+    .filter(({ entry }) => entry.destination === floor)
     .sort((a, b) => a.request.id.localeCompare(b.request.id, 'zh-CN'));
 }
 
@@ -116,10 +118,8 @@ function pickupFloors(car: ElevatorRuntime, requestMap: Map<string, RequestRunti
   );
 }
 
-function dropFloors(car: ElevatorRuntime, requestMap: Map<string, RequestRuntime>): number[] {
-  return uniqueFloors(
-    car.onboard.map((entry) => requestMap.get(entry.requestId)!.destination)
-  );
+function dropFloors(car: ElevatorRuntime): number[] {
+  return uniqueFloors(car.onboard.map((entry) => entry.destination));
 }
 
 function emit(events: SimEvent[], event: SimEvent): void {
@@ -187,8 +187,12 @@ function transferPassengers(
 
   for (const { entry, request } of alightingAtFloor(car, context.requestMap, car.floor)) {
     const people = entry.remaining;
-    car.onboard = car.onboard.filter((item) => item.requestId !== request.id);
-    request.onboardCarIds = request.onboardCarIds.filter((id) => id !== car.id);
+    // Remove only this batch; another batch of the same request may keep riding to a
+    // different destination that was locked in when that batch boarded.
+    car.onboard = car.onboard.filter((item) => item !== entry);
+    if (!car.onboard.some((item) => item.requestId === request.id)) {
+      request.onboardCarIds = request.onboardCarIds.filter((id) => id !== car.id);
+    }
     request.completed += people;
     const hasPassengersOnAnyCar = request.onboardCarIds.length > 0;
     if (hasPassengersOnAnyCar || request.remaining > 0) {
@@ -204,8 +208,9 @@ function transferPassengers(
       type: 'alight',
       floor: car.floor,
       people,
+      destination: entry.destination,
       peopleOnboard: carLoad(car),
-      message: `#${car.id}：${request.id} 在 ${car.floor} 层下客 ${people} 人；该请求累计完成 ${request.completed}/${request.people}。`
+      message: `#${car.id}：${request.id} 一批 ${people} 人在 ${car.floor} 层下车（上车时锁定目的层 ${entry.destination}）；该请求累计完成 ${request.completed}/${request.people}。`
     });
   }
 
@@ -225,7 +230,9 @@ function transferPassengers(
       request.remaining -= boarding;
       request.boarded += boarding;
       request.status = 'riding';
-      car.onboard.push({ requestId: request.id, remaining: boarding });
+      // The destination is locked into this batch at boarding time. A destination
+      // change after this tick only applies to people who have not boarded yet.
+      car.onboard.push({ requestId: request.id, remaining: boarding, destination: request.destination });
       if (!request.onboardCarIds.includes(car.id)) request.onboardCarIds.push(car.id);
       if (entry.remaining === 0) {
         car.waiting = car.waiting.filter((waiting) => waiting.requestId !== request.id);
@@ -242,12 +249,13 @@ function transferPassengers(
         floor: car.floor,
         people: boarding,
         remaining: request.remaining,
+        destination: request.destination,
         peopleOnboard: carLoad(car),
         reason: entry.remaining > 0 ? '轿厢容量不足，余客继续等待同一台电梯' : '该批乘客全部上车',
         message:
           entry.remaining > 0
-            ? `#${car.id}：${request.id} 在 ${car.floor} 层仅上车 ${boarding} 人，剩余 ${request.remaining} 人继续等待。`
-            : `#${car.id}：${request.id} 在 ${car.floor} 层上车 ${boarding} 人，全部已接走。`
+            ? `#${car.id}：${request.id} 在 ${car.floor} 层仅上车 ${boarding} 人（目的层 ${request.destination} 已锁定），剩余 ${request.remaining} 人继续等待。`
+            : `#${car.id}：${request.id} 在 ${car.floor} 层上车 ${boarding} 人（目的层 ${request.destination} 已锁定），全部已接走。`
       });
     } else {
       if (!car.attempted.includes(request.id)) car.attempted.push(request.id);
@@ -274,13 +282,13 @@ function chooseTargetFloor(car: ElevatorRuntime, requestMap: Map<string, Request
   // the car is empty; otherwise a full car returning for a residual pickup could fight against
   // onboard destination direction.
   const onboardDestinations = uniqueFloors(
-    car.onboard.map((entry) => requestMap.get(entry.requestId)!.destination)
+    car.onboard.map((entry) => entry.destination)
   ).filter((floor) => floor !== car.floor);
   const targetFloors = onboardDestinations.length > 0
     ? onboardDestinations
     : uniqueFloors([
         ...pickupFloors(car, requestMap),
-        ...dropFloors(car, requestMap)
+        ...dropFloors(car)
       ]).filter((floor) => floor !== car.floor);
 
   if (targetFloors.length === 0) return null;
@@ -346,7 +354,7 @@ function startMoving(
 
   const load = carLoad(car);
   const pickups = pickupFloors(car, context.requestMap);
-  const drops = dropFloors(car, context.requestMap);
+  const drops = dropFloors(car);
   const reason =
     `已承诺接客楼层 [${pickups.join(', ') || '无'}]，下客楼层 [${drops.join(', ') || '无'}]，` +
     `SCAN 方向${direction > 0 ? '向上' : '向下'}先到 ${target} 层；本层移动至 ${nextFloor} 层。`;
@@ -642,6 +650,62 @@ function cancelUnboarded(state: RuntimeState, request: RequestRuntime, tick: num
   });
 }
 
+/**
+ * Destination corrections take effect between cancellations and outage handling.
+ * Only people who have not boarded yet (request.remaining) follow the new floor;
+ * every onboard batch keeps the destination it locked in at boarding time, including
+ * batches frozen inside an out-of-service car. Terminal requests never reopen.
+ */
+function applyDestinationChanges(
+  state: RuntimeState,
+  scenario: ValidatedScenario,
+  tick: number
+): void {
+  for (const change of scenario.destinationChanges.filter((event) => event.tick === tick)) {
+    const request = state.requests.find((item) => item.id === change.requestId);
+    if (!request) continue; // validation guarantees the request exists
+
+    const previous = request.destination;
+    const onboardBatches = state.cars.flatMap((car) =>
+      car.onboard
+        .filter((entry) => entry.requestId === request.id)
+        .map((entry) => ({ carId: car.id, people: entry.remaining, destination: entry.destination }))
+    );
+    const onboardPeople = onboardBatches.reduce((sum, batch) => sum + batch.people, 0);
+    const batchText = onboardBatches.length
+      ? onboardBatches.map((batch) => `#${batch.carId} 车 ${batch.people} 人→${batch.destination} 层`).join('、')
+      : '无';
+    const terminal = request.status === 'completed' || request.status === 'cancelled';
+    const affected = terminal ? 0 : request.remaining;
+
+    if (affected > 0) {
+      request.destination = change.destination;
+    }
+
+    emit(state.events, {
+      tick,
+      requestId: request.id,
+      type: 'destination_change',
+      fromFloor: previous,
+      toFloor: change.destination,
+      people: affected,
+      destination: change.destination,
+      peopleOnboard: onboardPeople,
+      reason:
+        '目的地更正只适用于生效时刻仍未上车的人；已上车各批保留上车时锁定的目的层，终态不重新开放。',
+      message:
+        affected > 0
+          ? `请求 ${request.id} 目的层 ${previous} → ${change.destination}：对尚未上车的 ${affected} 人生效；` +
+            `已上车 ${onboardPeople} 人保留原约定（${batchText}）。`
+          : `请求 ${request.id} 目的层更正 ${previous} → ${change.destination} 不影响任何在运乘客：` +
+            (terminal
+              ? `请求已终态（${request.status === 'completed' ? '完成' : '取消'}），不重新开放；`
+              : '当前没有未上车乘客；') +
+            `已上车 ${onboardPeople} 人保留原约定（${batchText}）。`
+    });
+  }
+}
+
 function phaseRemainingTicks(
   car: ElevatorRuntime,
   scenario: ValidatedScenario
@@ -776,7 +840,7 @@ function makeSnapshot(
       onboard: car.onboard.map((entry) => ({ ...entry })),
       attempted: [...car.attempted],
       committedPickupFloors: pickupFloors(car, requestMap),
-      committedDropFloors: dropFloors(car, requestMap)
+      committedDropFloors: dropFloors(car)
     })),
     requests: state.requests.map((request) => ({
       id: request.id,
@@ -854,10 +918,10 @@ function processTick(
     }
   }
 
-  for (const change of scenario.destinationChanges.filter(e => e.tick === tick)) {
-    const request = state.requests.find(r => r.id === change.requestId)!;
-    request.destination = change.destination;
-  }
+  // Destination corrections take effect after cancellations but before outage handling,
+  // so a same-tick cancel shrinks the affected crowd first and a frozen car's riders are
+  // never re-routed. Boarding/alighting later this tick sees the corrected destination.
+  applyDestinationChanges(state, scenario, tick);
 
   // Scheduled outages take effect after arrivals/cancellations but before this tick's dispatch
   // and car transitions. At one tick, all outages precede recoveries; cars are then ordered by ID.

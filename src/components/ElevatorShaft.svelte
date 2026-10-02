@@ -43,6 +43,11 @@
                 class:open={car.phase === 'open'}
                 class:moving={car.phase === 'moving'}
                 class:outage={car.outOfService}
+                title={car.onboard.length
+                  ? `车内批次：${car.onboard
+                      .map((entry) => `${entry.requestId}→${entry.destination}层(${entry.remaining}人)`)
+                      .join('，')}`
+                  : '空车'}
               >
                 <div class="car-head">
                   <span>#{car.id}{car.outOfService ? ' 停运' : ''}</span>

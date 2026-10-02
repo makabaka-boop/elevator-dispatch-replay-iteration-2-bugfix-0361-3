@@ -19,7 +19,8 @@ export const sampleScenario: Scenario = {
     { tick: 12, carId: 0, type: 'recovery' },
     { tick: 18, carId: 1, type: 'outage' },
     { tick: 20, carId: 1, type: 'recovery' }
-  ]
+  ],
+  destinationChanges: [{ tick: 6, requestId: 'R004', destination: 9 }]
 };
 
 export const stressScenario: Scenario = {

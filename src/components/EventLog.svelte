@@ -17,6 +17,7 @@
     move_arrive: 'move',
     cancel: 'cancel',
     cancel_rejected: 'cancel',
+    destination_change: 'change',
     outage: 'outage',
     recovery: 'outage',
     commitment_withdrawn: 'outage',
@@ -37,6 +38,7 @@
     move_arrive: '到达',
     cancel: '取消',
     cancel_rejected: '取消拒绝',
+    destination_change: '目的地更正',
     outage: '停运',
     recovery: '恢复',
     commitment_withdrawn: '撤回承诺',
@@ -146,6 +148,7 @@
   .board { border-color: #fbbf24; }
   .alight { border-color: #4ade80; }
   .cancel { border-color: #fb7185; }
+  .change { border-color: #f472b6; }
   .outage { border-color: #f97316; }
   .arrival { border-color: #94a3b8; }
   .idle { border-color: #475569; }

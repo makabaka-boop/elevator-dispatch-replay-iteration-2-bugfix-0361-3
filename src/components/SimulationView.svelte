@@ -46,6 +46,14 @@
               <div><dt>方向</dt><dd>{car.direction === 1 ? '上行' : car.direction === -1 ? '下行' : '停'}</dd></div>
               <div><dt>接客层</dt><dd>{car.committedPickupFloors.join(', ') || '—'}</dd></div>
               <div><dt>下客层</dt><dd>{car.committedDropFloors.join(', ') || '—'}</dd></div>
+              <div>
+                <dt>车内批次</dt>
+                <dd>
+                  {car.onboard.length
+                    ? car.onboard.map((item) => `${item.requestId}→${item.destination}层(${item.remaining}人)`).join('，')
+                    : '—'}
+                </dd>
+              </div>
               <div><dt>余客请求</dt><dd>{car.waiting.map((item) => item.requestId).join(', ') || '—'}</dd></div>
             </dl>
           </article>

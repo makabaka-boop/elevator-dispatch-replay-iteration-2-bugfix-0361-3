@@ -65,6 +65,15 @@ export interface CarRequest {
   remaining: number;
 }
 
+/**
+ * A batch of riders that boarded together. The destination is locked in at boarding
+ * time: later destinationChanges only apply to people who have not boarded yet, so
+ * one request can have several batches on different cars with different destinations.
+ */
+export interface OnboardRequest extends CarRequest {
+  destination: number;
+}
+
 export interface ElevatorRuntime {
   id: number;
   floor: number;
@@ -72,7 +81,7 @@ export interface ElevatorRuntime {
   direction: Direction;
   phase: DoorPhase;
   phaseElapsed: number;
-  onboard: CarRequest[];
+  onboard: OnboardRequest[];
   waiting: CarRequest[];
   attempted: string[];
   /** request IDs selected but not yet serviced at their origin. */
@@ -114,6 +123,7 @@ export type SimEventType =
   | 'move_arrive'
   | 'cancel'
   | 'cancel_rejected'
+  | 'destination_change'
   | 'outage'
   | 'recovery'
   | 'commitment_withdrawn'
@@ -144,6 +154,8 @@ export interface SimEvent {
   dropOffs?: number[];
   reason?: string;
   peopleOnboard?: number;
+  /** Locked batch destination on board/alight events; new floor on destination_change. */
+  destination?: number;
 }
 
 export interface TickRequestView {
@@ -174,7 +186,7 @@ export interface TickCarView {
   outOfService: boolean;
   outageStartedTick: number | null;
   waiting: Array<{ requestId: string; remaining: number }>;
-  onboard: Array<{ requestId: string; remaining: number }>;
+  onboard: Array<{ requestId: string; remaining: number; destination: number }>;
   attempted: string[];
   committedPickupFloors: number[];
   committedDropFloors: number[];

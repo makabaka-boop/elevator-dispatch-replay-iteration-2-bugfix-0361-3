@@ -432,8 +432,7 @@ describe('discrete elevator reference replay', () => {
     conservationChecks(result.ticks);
   });
 
-  it('validates deterministic outage transitions and keeps old scenarios unchanged', () => {
-    const base: Scenario = {
+  it('validates deterministic outage transitions and keeps old scenarios unchanged', () => {    const base: Scenario = {
       floors: 5,
       elevators: 2,
       travelTicks: 1,
@@ -464,5 +463,236 @@ describe('discrete elevator reference replay', () => {
       ...base,
       outageEvents: [{ tick: 1, carId: 0, type: 'outage' }]
     })).toThrow('对应的恢复事件');
+  });
+});
+
+describe('waiting-passenger destination changes', () => {
+  it('locks each onboard batch at boarding time and only re-routes the unboarded remainder', () => {
+    const scenario: Scenario = {
+      floors: 10,
+      elevators: 2,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'BIG', arrivalTick: 0, origin: 1, destination: 8, people: 10 }],
+      destinationChanges: [{ tick: 3, requestId: 'BIG', destination: 4 }]
+    };
+
+    const result = simulate(scenario);
+    const change = findEvent(result, 3, 'BIG', 'destination_change')!;
+    expect(change).toMatchObject({ fromFloor: 8, toFloor: 4, people: 4, peopleOnboard: 6 });
+    expect(change.reason).toContain('仍未上车');
+
+    // The snapshot explains both agreements at once: the frozen batch keeps floor 8
+    // while the waiting remainder now follows floor 4.
+    const carAtChange = result.ticks[3].cars[0];
+    expect(carAtChange.onboard).toEqual([{ requestId: 'BIG', remaining: 6, destination: 8 }]);
+    expect(carAtChange.committedDropFloors).toEqual([8]);
+    expect(result.ticks[3].requests.find((request) => request.id === 'BIG')!.destination).toBe(4);
+
+    const alights = result.ticks.flatMap((snapshot) =>
+      snapshot.events.filter((event) => event.requestId === 'BIG' && event.type === 'alight')
+    );
+    expect(alights.map((event) => [event.floor, event.people])).toEqual([[8, 6], [4, 4]]);
+    expect(alights[0].destination).toBe(8);
+    expect(alights[1].destination).toBe(4);
+    conservationChecks(result.ticks);
+  });
+
+  it('applies a change during an outage to withdrawn riders only; frozen riders keep their floor', () => {
+    const scenario: Scenario = {
+      floors: 10,
+      elevators: 2,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'BIG', arrivalTick: 0, origin: 1, destination: 8, people: 10 }],
+      outageEvents: [
+        { tick: 4, carId: 0, type: 'outage' },
+        { tick: 7, carId: 0, type: 'recovery' }
+      ],
+      destinationChanges: [{ tick: 5, requestId: 'BIG', destination: 3 }]
+    };
+
+    const result = simulate(scenario);
+    // The frozen car keeps its locked drop commitment for the whole outage.
+    for (const tick of [4, 5, 6]) {
+      expect(result.ticks[tick].cars[0]).toMatchObject({ outOfService: true, peopleOnboard: 6 });
+      expect(result.ticks[tick].cars[0].onboard).toEqual([
+        { requestId: 'BIG', remaining: 6, destination: 8 }
+      ]);
+      expect(result.ticks[tick].cars[0].committedDropFloors).toEqual([8]);
+    }
+
+    // The 4 withdrawn riders are redispatched to car #1 and board on the same tick as the
+    // change; the change is applied before car transitions, so they lock the new floor.
+    const change = findEvent(result, 5, 'BIG', 'destination_change')!;
+    expect(change).toMatchObject({ people: 4, peopleOnboard: 6 });
+    const board = result.ticks[5].events.find(
+      (event) => event.requestId === 'BIG' && event.type === 'board'
+    )!;
+    expect(board).toMatchObject({ carId: 1, people: 4, destination: 3 });
+    const tick5Events = result.ticks[5].events;
+    expect(tick5Events.findIndex((event) => event.type === 'destination_change'))
+      .toBeLessThan(tick5Events.findIndex((event) => event.type === 'board'));
+
+    const alights = result.ticks.flatMap((snapshot) =>
+      snapshot.events.filter((event) => event.requestId === 'BIG' && event.type === 'alight')
+    );
+    expect(alights.map((event) => [event.carId, event.floor, event.people])).toEqual([
+      [1, 3, 4],
+      [0, 8, 6]
+    ]);
+    conservationChecks(result.ticks);
+  });
+
+  it('lets a same-tick cancellation shrink the affected crowd before the change applies', () => {
+    const scenario: Scenario = {
+      floors: 8,
+      elevators: 2,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'WAIT', arrivalTick: 0, origin: 5, destination: 2, people: 3, cancelTick: 2 }],
+      destinationChanges: [{ tick: 2, requestId: 'WAIT', destination: 4 }]
+    };
+
+    const result = simulate(scenario);
+    expect(findEvent(result, 2, 'WAIT', 'cancel')?.people).toBe(3);
+    const change = findEvent(result, 2, 'WAIT', 'destination_change')!;
+    expect(change.people).toBe(0);
+    expect(change.message).toContain('终态');
+    // A terminal request never reopens: its recorded destination stays untouched.
+    const final = result.ticks[result.finalTick].requests.find((request) => request.id === 'WAIT')!;
+    expect(final).toMatchObject({ destination: 2, cancelled: 3, status: 'cancelled' });
+    conservationChecks(result.ticks);
+  });
+
+  it('locks the corrected destination for passengers boarding later on the same tick', () => {
+    const scenario: Scenario = {
+      floors: 8,
+      elevators: 2,
+      travelTicks: 1,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'REQ', arrivalTick: 0, origin: 1, destination: 8, people: 2 }],
+      destinationChanges: [{ tick: 1, requestId: 'REQ', destination: 5 }]
+    };
+
+    const result = simulate(scenario);
+    const board = result.ticks[1].events.find(
+      (event) => event.requestId === 'REQ' && event.type === 'board'
+    )!;
+    expect(board).toMatchObject({ people: 2, destination: 5 });
+    expect(board.message).toContain('目的层 5 已锁定');
+
+    const alight = result.ticks.flatMap((snapshot) =>
+      snapshot.events.filter((event) => event.requestId === 'REQ' && event.type === 'alight')
+    );
+    expect(alight.map((event) => [event.floor, event.people])).toEqual([[5, 2]]);
+    conservationChecks(result.ticks);
+  });
+
+  it('rejects invalid destination change definitions with specific errors', () => {
+    const base: Scenario = {
+      floors: 6,
+      elevators: 2,
+      travelTicks: 1,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'X', arrivalTick: 2, origin: 1, destination: 6, people: 1 }]
+    };
+
+    expect(() => simulate({ ...base, destinationChanges: [null as never] }))
+      .toThrow('必须是包含 tick、requestId、destination 的对象');
+    expect(() => simulate({ ...base, destinationChanges: [{} as never] }))
+      .toThrow('不存在');
+    expect(() => simulate({
+      ...base,
+      destinationChanges: [{ tick: 3, requestId: 'NOPE', destination: 4 }]
+    })).toThrow('不存在');
+    expect(() => simulate({
+      ...base,
+      destinationChanges: [{ tick: 1, requestId: 'X', destination: 4 }]
+    })).toThrow('不能早于');
+    expect(() => simulate({
+      ...base,
+      destinationChanges: [{ tick: 3, requestId: 'X', destination: 1 }]
+    })).toThrow('出发层相同');
+    expect(() => simulate({
+      ...base,
+      destinationChanges: [{ tick: 3, requestId: 'X', destination: 99 }]
+    })).toThrow('之间');
+    expect(() => simulate({ ...base, destinationChanges: 'x' as never }))
+      .toThrow('destinationChanges 必须是数组');
+  });
+
+  it('applies same-tick corrections in input order to the still-unboarded crowd', () => {
+    const scenario: Scenario = {
+      floors: 12,
+      elevators: 2,
+      travelTicks: 1,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'B', arrivalTick: 5, origin: 3, destination: 12, people: 4 }],
+      destinationChanges: [
+        { tick: 5, requestId: 'B', destination: 7 },
+        { tick: 5, requestId: 'B', destination: 2 }
+      ]
+    };
+
+    const result = simulate(scenario);
+    const changes = result.ticks[5].events.filter((event) => event.type === 'destination_change');
+    // Stable input order: the second correction sees the first one's result.
+    expect(changes.map((event) => [event.fromFloor, event.toFloor, event.people])).toEqual([
+      [12, 7, 4],
+      [7, 2, 4]
+    ]);
+    expect(result.ticks[5].requests.find((request) => request.id === 'B')!.destination).toBe(2);
+
+    const alights = result.ticks.flatMap((snapshot) =>
+      snapshot.events.filter((event) => event.requestId === 'B' && event.type === 'alight')
+    );
+    expect(alights.map((event) => [event.floor, event.people])).toEqual([[2, 4]]);
+    conservationChecks(result.ticks);
+  });
+
+  it('replays identically and keeps scenarios without changes frame-by-frame compatible', () => {
+    const scenario: Scenario = {
+      floors: 12,
+      elevators: 3,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [
+        { id: 'A', arrivalTick: 0, origin: 1, destination: 9, people: 9 },
+        { id: 'B', arrivalTick: 2, origin: 3, destination: 12, people: 4, cancelTick: 10 },
+        { id: 'C', arrivalTick: 4, origin: 6, destination: 1, people: 2 }
+      ],
+      outageEvents: [
+        { tick: 6, carId: 0, type: 'outage' },
+        { tick: 9, carId: 0, type: 'recovery' }
+      ],
+      destinationChanges: [
+        { tick: 3, requestId: 'A', destination: 5 },
+        { tick: 10, requestId: 'B', destination: 7 },
+        { tick: 10, requestId: 'B', destination: 2 }
+      ]
+    };
+
+    const first = simulate(scenario);
+    const second = simulate(scenario);
+    expect(second.ticks).toEqual(first.ticks);
+    // B is cancelled at tick 10 before the corrections run, so both become terminal
+    // no-ops that leave the recorded destination untouched.
+    const changes = first.ticks[10].events.filter((event) => event.type === 'destination_change');
+    expect(changes.map((event) => [event.fromFloor, event.toFloor, event.people])).toEqual([
+      [12, 7, 0],
+      [12, 2, 0]
+    ]);
+    conservationChecks(first.ticks);
+
+    const withoutChanges = simulate({ ...scenario, destinationChanges: undefined });
+    expect(withoutChanges.ticks.length).toBeGreaterThan(0);
   });
 });

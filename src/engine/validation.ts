@@ -5,6 +5,7 @@ import {
   MAX_REQUESTS,
   MIN_CARS,
   MIN_FLOORS,
+  type DestinationChange,
   type Scenario,
   type ScenarioOutageEvent,
   type ValidatedRequest,
@@ -177,22 +178,53 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
     });
   }
 
-  const destinationChanges = input?.destinationChanges ?? [];
-  if (!Array.isArray(destinationChanges)) errors.push('destinationChanges 必须是数组。');
-  else for (const change of destinationChanges) {
-    const request = validRequests.find(r => r.id === change.requestId);
-    if (!request || !isFiniteInteger(change.tick) || change.tick < request.arrivalTick ||
-        !isFiniteInteger(change.destination) || change.destination < 1 ||
-        change.destination > floorCount || change.destination === request.origin) {
-      errors.push('目的地更正事件无效。');
-    }
+  const destinationChangeInput = input?.destinationChanges;
+  const hasDestinationChanges = destinationChangeInput !== undefined && destinationChangeInput !== null;
+  const destinationChangeList = Array.isArray(destinationChangeInput) ? destinationChangeInput : null;
+  if (hasDestinationChanges && !destinationChangeList) {
+    errors.push('destinationChanges 必须是数组。');
   }
+
+  const validDestinationChanges: DestinationChange[] = [];
+  destinationChangeList?.forEach((raw, index) => {
+    const prefix = `目的地更正 ${index + 1}`;
+    if (!raw || typeof raw !== 'object') {
+      errors.push(`${prefix}: 必须是包含 tick、requestId、destination 的对象。`);
+      return;
+    }
+    const request = validRequests.find((item) => item.id === raw.requestId);
+    const tickValid = isFiniteInteger(raw.tick) && raw.tick >= 0;
+    const destinationValid =
+      isFiniteInteger(raw.destination) && raw.destination >= 1 && raw.destination <= floorCount;
+
+    if (!request) errors.push(`${prefix}: 引用的请求 ${String(raw.requestId)} 不存在。`);
+    if (!tickValid) errors.push(`${prefix}: tick 必须是非负整数。`);
+    if (!destinationValid) {
+      errors.push(`${prefix}: 目的层必须在 1 到 ${floorCount || MAX_FLOORS} 之间。`);
+    }
+    if (request && tickValid && raw.tick < request.arrivalTick) {
+      errors.push(`${prefix}: tick 不能早于请求 ${request.id} 的到达 tick。`);
+    }
+    if (request && destinationValid && raw.destination === request.origin) {
+      errors.push(`${prefix}: 目的层不能与请求 ${request.id} 的出发层相同。`);
+    }
+
+    if (request && tickValid && destinationValid && raw.tick >= request.arrivalTick &&
+        raw.destination !== request.origin) {
+      validDestinationChanges.push({
+        tick: raw.tick,
+        requestId: request.id,
+        destination: raw.destination
+      });
+    }
+  });
   if (errors.length > 0) {
     throw new Error(errors.join('\n'));
   }
 
   const scenario: ValidatedScenario = {
-    destinationChanges: destinationChanges.slice().sort((a,b) => a.tick-b.tick),
+    // Stable sort: same-tick corrections keep input order and apply deterministically.
+    destinationChanges: validDestinationChanges.slice().sort((a, b) => a.tick - b.tick),
     floors: floors as number,
     elevators: elevators as number,
     travelTicks: travelTicks as number,
